@@ -1,6 +1,7 @@
 require('dotenv').config();
 const { App } = require('@slack/bolt');
 const cron = require('node-cron');
+const { isThreadReply, getDirectAnswer, THREAD_NUDGE, THANK_YOU } = require('./lib/dm-flow');
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 
@@ -52,6 +53,11 @@ async function getMembersToCheck() {
 }
 
 async function openDmAndAsk(userId) {
+  if (activeSessions[userId]) {
+    console.log(`[bot] Skipping ${userId} — check-in already in progress`);
+    return;
+  }
+
   const dm = await app.client.conversations.open({ users: userId });
   const dmChannelId = dm.channel.id;
 
@@ -61,9 +67,12 @@ async function openDmAndAsk(userId) {
     channel: dmChannelId,
     text: [
       `Hey there! 👋 It's *preloveyou* weekly check-in time.`,
-      `I'll ask you 3 quick questions — just reply to each one!\n`,
-      QUESTIONS[0],
+      `I'll ask you 3 quick questions — reply directly in this chat (not in a thread).`,
     ].join('\n'),
+  });
+  await app.client.chat.postMessage({
+    channel: dmChannelId,
+    text: QUESTIONS[0],
   });
 }
 
@@ -147,25 +156,33 @@ async function postSummary(memberIds) {
 
 // ─── DM Message Handler ───────────────────────────────────────────────────────
 
-app.message(async ({ message, say }) => {
+app.message(async ({ message, say, client }) => {
   const userId = message.user;
-  if (!userId || message.bot_id || message.subtype) return;
+  if (!userId || message.bot_id) return;
+  if (message.subtype && message.subtype !== 'file_share') return;
 
   const session = activeSessions[userId];
-  if (!session || message.channel !== session.dmChannelId) return;
+  if (!session) return;
+  if (message.channel !== session.dmChannelId) return;
 
-  const answer = (message.text || '').trim();
+  if (isThreadReply(message)) {
+    await client.chat.postMessage({ channel: session.dmChannelId, text: THREAD_NUDGE });
+    return;
+  }
+
+  const answer = getDirectAnswer(message);
+  if (!answer) return;
+
   session.answers.push(answer);
   session.step += 1;
+  console.log(`[bot] Answer ${session.step}/${QUESTIONS.length} from ${userId}`);
 
   if (session.step < QUESTIONS.length) {
-    // Ask the next question
     await say(QUESTIONS[session.step]);
   } else {
-    // All answered
     completedAnswers[userId] = [...session.answers];
     delete activeSessions[userId];
-    await say('✅ Thanks! Your update has been recorded. Have a great weekend! 🎉');
+    await say(THANK_YOU);
   }
 });
 
